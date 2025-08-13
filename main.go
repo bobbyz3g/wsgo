@@ -1,81 +1,70 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
-	"io"
-	"log"
 	"os"
+	"strings"
 
+	flag "github.com/spf13/pflag"
 	"golang.org/x/net/websocket"
 )
 
+var (
+	headers = flag.StringSliceP("header", "H", nil, "Header to add to the request")
+	origin  = flag.StringP("origin", "o", "http://localhost/", "Origin to add to the request")
+	cookies = flag.StringSliceP("cookie", "b", nil, "Cookie to add to the request")
+)
+
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Println("Usage: wsgo <websocket_url>")
+	flag.Usage = usage
+	flag.Parse()
+	args := flag.Args()
+	if len(args) == 0 {
+		usage()
 		os.Exit(1)
 	}
+	url := args[0]
 
-	url := os.Args[1]
-	origin := "http://localhost/" // A default origin is often sufficient
-
-	ws, err := websocket.Dial(url, "", origin)
+	err := wsgoMain(url)
 	if err != nil {
-		log.Fatal(err)
+		fmt.Println(err.Error())
+		os.Exit(1)
 	}
-	defer ws.Close()
-
-	fmt.Printf("Connected to %s\n", url)
-	fmt.Println("Enter text to send, press Ctrl+C to exit.")
-
-	closeCh := make(chan struct{})
-	go receiveMessages(ws, closeCh)
-	sendMessages(ws)
 }
 
-func receiveMessages(ws *websocket.Conn, closeCh chan struct{}) {
-	for {
-		select {
-		case <-closeCh:
-			return
-		default:
-		}
+func wsgoMain(url string) error {
+	cfg, err := websocket.NewConfig(url, *origin)
+	if err != nil {
+		return err
+	}
 
-		var msg string
-		err := websocket.Message.Receive(ws, &msg)
-		if err != nil {
-			if err == io.EOF {
-				close(closeCh)
-				log.Println("Connection closed by server.")
-				os.Exit(0)
+	if headers != nil {
+		for _, h := range *headers {
+			parts := strings.SplitN(h, ":", 2)
+			if len(parts) == 2 {
+				key := strings.TrimSpace(parts[0])
+				value := strings.TrimSpace(parts[1])
+				cfg.Header.Add(key, value)
 			}
-			log.Printf("Receive error: %v\n", err)
-			return
 		}
-		// \r moves cursor to the start of the line.
-		// \033[K is an ANSI escape code to clear the line.
-		// This prevents received messages from corrupting the input line.
-		fmt.Printf("\r\033[K<- %s\n\n", msg)
-		fmt.Print("-> ")
 	}
+	if cookies != nil {
+		for _, c := range *cookies {
+			cfg.Header.Add("Cookie", c)
+		}
+	}
+	cli := NewClient(cfg)
+	fmt.Printf("Connected to %s\n", url)
+
+	err = cli.Run(nil)
+	if err != nil {
+		return err
+	}
+	fmt.Println("Exiting...")
+	return nil
 }
 
-func sendMessages(ws *websocket.Conn) {
-	scanner := bufio.NewScanner(os.Stdin)
-	fmt.Print("-> ")
-	for {
-		if !scanner.Scan() {
-			break
-		}
-		text := scanner.Text()
-		err := websocket.Message.Send(ws, text)
-		if err != nil {
-			log.Printf("Send error: %v\n", err)
-			return
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		log.Printf("Error reading from stdin: %v\n", err)
-	}
-	fmt.Println()
+func usage() {
+	fmt.Fprintf(os.Stderr, "usage: wsgo [flags] <websocket-url>\n")
+	flag.PrintDefaults()
 }
